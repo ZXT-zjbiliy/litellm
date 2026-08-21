@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from contextlib import suppress
 
 import httpx
 import pytest
@@ -217,7 +218,10 @@ async def _async_return(value):
 
 def test_anthropic_experimental_pass_through_messages_handler_custom_llm_provider():
     """
-    Test that litellm.completion is called when a custom LLM provider is given
+    Test that litellm.completion is called when a custom LLM provider is given.
+
+    Provider resolution now happens exactly once, inside litellm.completion itself
+    (BerriAI/litellm#37716), so the handler passes the original unresolved model through.
     """
     from litellm.llms.anthropic.experimental_pass_through.messages.handler import (
         anthropic_messages_handler,
@@ -241,7 +245,7 @@ def test_anthropic_experimental_pass_through_messages_handler_custom_llm_provide
         # Verify that the custom provider was passed through
         call_kwargs = mock_completion.call_args.kwargs
         assert call_kwargs["custom_llm_provider"] == "my-custom-llm"
-        assert call_kwargs["model"] == "my-custom-llm/my-custom-model"
+        assert call_kwargs["model"] == "my-custom-model"
         assert call_kwargs["api_key"] == "test-api-key"
 
 
@@ -997,3 +1001,39 @@ def test_first_party_claude_4_8_plus_cost_map_entries_carry_mid_conversation_sys
         and info.get("supports_mid_conversation_system") is not True
     ]
     assert missing == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "requested_model, expected_wire_model",
+    [
+        ("perplexity/perplexity/kimi-k3", "perplexity/kimi-k3"),
+        ("perplexity/sonar", "sonar"),
+    ],
+)
+async def test_messages_strips_provider_prefix_exactly_once(requested_model, expected_wire_model):
+    """
+    BerriAI/litellm#37716: only the leading provider segment may be stripped on the way upstream.
+
+    A multi-segment id such as perplexity/perplexity/kimi-k3 must reach the provider as
+    perplexity/kimi-k3, matching what /v1/chat/completions and /v1/responses already send.
+
+    The subject is the outbound request, so the transport is cut at the wire rather than
+    stubbed with a response body: these two ids take different bridges (chat completions
+    versus the Responses API) and would otherwise need different response shapes.
+    """
+    captured = {}
+
+    async def fake_send(self, request, **kwargs):
+        captured["body"] = json.loads(request.content)
+        raise httpx.ConnectError("cut at the wire", request=request)
+
+    with patch.object(httpx.AsyncClient, "send", fake_send), suppress(Exception):
+        await litellm.anthropic.messages.acreate(
+            max_tokens=100,
+            messages=[{"role": "user", "content": "ping"}],
+            model=requested_model,
+            api_key="test-api-key",
+        )
+
+    assert captured["body"]["model"] == expected_wire_model

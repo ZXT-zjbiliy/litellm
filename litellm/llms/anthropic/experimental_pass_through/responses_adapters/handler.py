@@ -30,6 +30,11 @@ def _forwarded_kwargs(extra_kwargs: Mapping[str, object] | None) -> Mapping[str,
     return extra_kwargs or {}
 
 
+def _local_model(model: str, custom_llm_provider: object) -> str:
+    """The id the provider itself knows, for reporting in ``message_start``."""
+    return model.removeprefix(f"{custom_llm_provider}/") if isinstance(custom_llm_provider, str) else model
+
+
 def _build_responses_kwargs(
     *,
     max_tokens: int,
@@ -179,7 +184,9 @@ class LiteLLMMessagesToResponsesAPIHandler:
         result: Final = await litellm.aresponses(**responses_kwargs)
 
         if stream:
-            wrapper: Final = AnthropicResponsesStreamWrapper(responses_stream=result, model=model)
+            wrapper: Final = AnthropicResponsesStreamWrapper(
+                responses_stream=result, model=_local_model(model, kwargs.get("custom_llm_provider"))
+            )
             return wrapper.async_anthropic_sse_wrapper()
 
         if not isinstance(result, ResponsesAPIResponse):
@@ -257,7 +264,9 @@ class LiteLLMMessagesToResponsesAPIHandler:
         result: Final = litellm.responses(**responses_kwargs)
 
         if stream:
-            wrapper: Final = AnthropicResponsesStreamWrapper(responses_stream=result, model=model)
+            wrapper: Final = AnthropicResponsesStreamWrapper(
+                responses_stream=result, model=_local_model(model, kwargs.get("custom_llm_provider"))
+            )
             return wrapper.async_anthropic_sse_wrapper()
 
         if not isinstance(result, ResponsesAPIResponse):
